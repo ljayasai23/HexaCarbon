@@ -1,0 +1,20 @@
+# Node dependencies
+node_modules/
+
+# Server-specific files
+hexacarbon-backend/uploads/
+hexacarbon-backend/node_modules/
+
+# Environment variables file - VERY IMPORTANT
+.env
+hexacarbon-backend/.env
+
+# Hardhat build artifacts and cache
+artifacts/
+cache/
+hexacarbon-backend/artifacts/
+hexacarbon-backend/cache/
+
+# Log files
+*.log
+
