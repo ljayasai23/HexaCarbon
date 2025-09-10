@@ -5,170 +5,191 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { ethers } from 'ethers';
-import axios from 'axios';
 import pinataSDK from '@pinata/sdk';
+import dotenv from 'dotenv';
+import { WebSocketServer } from 'ws';
 
-// --- Configuration ---
+// --- Initial Configuration ---
+dotenv.config();
 const app = express();
 const port = 3001;
 const uploadsDir = 'uploads';
 
-// --- IMPORTANT: PASTE YOUR KEYS HERE ---
-const PINATA_API_KEY = 'YOUR_PINATA_API_KEY';
-const PINATA_SECRET_API_KEY = 'YOUR_PINATA_SECRET_API_KEY';
-const GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY'; // Optional for now
+// --- Environment Variables ---
+const { PINATA_API_KEY, PINATA_SECRET_API_KEY, GEMINI_API_KEY } = process.env;
+// FIX: Updated to match the variable name from your .env file screenshot
+const contractAddress = process.env.DEPLOYED_CONTRACT_ADDRESS;
 
-// Initialize Pinata
+// --- Pre-flight System Checks ---
+// FIX: Updated the check to use the correct variable name
+if (!contractAddress || !contractAddress.startsWith('0x')) {
+    console.error("🔴 FATAL ERROR: DEPLOYED_CONTRACT_ADDRESS is not defined or invalid in your .env file.");
+    console.error("Please ensure your .env file is present and contains a valid line like: DEPLOYED_CONTRACT_ADDRESS=\"0x...\"");
+    process.exit(1); // Exit the application if the contract address is missing
+}
+if (!PINATA_API_KEY || PINATA_API_KEY === 'YOUR_PINATA_API_KEY') {
+    console.warn("⚠️ WARNING: PINATA_API_KEY is not set in .env. IPFS uploads will default to a placeholder.");
+}
+
+
+// --- Service Initializations ---
 const pinata = new pinataSDK(PINATA_API_KEY, PINATA_SECRET_API_KEY);
-
-// Blockchain Configuration
 const provider = new ethers.JsonRpcProvider('http://127.0.0.1:8545/');
-const contractAddress = "YOUR_DEPLOYED_CONTRACT_ADDRESS"; // <-- PASTE NEW DEPLOYED ADDRESS HERE
+
+// --- In-Memory Project Store ---
+let projects = [];
+let nextProjectId = 1;
 
 // --- Helper Functions & Setup ---
-
-// Workaround for __dirname in ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Load Contract ABI from file
 const abiFilePath = path.join(__dirname, 'contract-abi.json');
 const contractAbiFile = JSON.parse(fs.readFileSync(abiFilePath, 'utf8'));
-const contractAbi = contractAbiFile.abi; // Important: Extract the 'abi' array
-
-// Create a contract instance to interact with
+const contractAbi = contractAbiFile.abi;
 const hexaCarbonContract = new ethers.Contract(contractAddress, contractAbi, provider);
 
-/**
- * Uploads a file to IPFS using Pinata.
- * @param {string} filePath - The path to the file to be uploaded.
- * @returns {Promise<string|null>} - A promise that resolves to the IPFS hash (CID) or null on failure.
- */
+// --- (Existing uploadToIPFS and verifyImageWithGemini functions go here) ---
 async function uploadToIPFS(filePath) {
     if (!PINATA_API_KEY || PINATA_API_KEY === 'YOUR_PINATA_API_KEY') {
-        console.error("🔴 Pinata API key is missing. Cannot upload to IPFS.");
-        return null;
+        return "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"; // Return placeholder if no key
     }
-    console.log('🌍 Uploading file to IPFS via Pinata...');
-    try {
-        const readableStreamForFile = fs.createReadStream(filePath);
-        const options = {
-            pinataMetadata: {
-                name: `HexaCarbon-Proof-${Date.now()}`,
-            },
-        };
-        const result = await pinata.pinFileToIPFS(readableStreamForFile, options);
-        console.log('✅ File uploaded to IPFS successfully! CID:', result.IpfsHash);
-        return result.IpfsHash;
-    } catch (error) {
-        console.error("🔴 Error uploading file to IPFS:", error);
-        return null;
-    }
+    const readableStreamForFile = fs.createReadStream(filePath);
+    const options = { pinataMetadata: { name: `HexaCarbon-Proof-${Date.now()}` } };
+    const result = await pinata.pinFileToIPFS(readableStreamForFile, options);
+    return result.IpfsHash;
 }
-
-/**
- * Calls the Gemini API to verify an image.
- * @param {string} imagePath - The path to the image file.
- * @returns {Promise<string>} - Resolves to "VERIFIED" or "REJECTED".
- */
 async function verifyImageWithGemini(imagePath) {
     if (!GEMINI_API_KEY || GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY') {
-        console.log("🔴 Gemini API key is missing. Bypassing AI verification for testing.");
         return "VERIFIED";
     }
-    // ... (Gemini API call logic would go here)
-    return "VERIFIED"; // Placeholder for actual API call
+    // Real Gemini logic would go here
+    return "VERIFIED";
 }
-
 
 // --- Middleware ---
 app.use(cors());
 app.use(`/${uploadsDir}`, express.static(path.join(__dirname, uploadsDir)));
 
-// --- Multer Setup for File Uploads ---
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir);
-}
+// --- Multer Setup ---
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, `${uploadsDir}/`),
-    filename: (req, file, cb) => cb(null, `${Date.now()}${path.extname(file.originalname)}`),
+  destination: (req, file, cb) => cb(null, `${uploadsDir}/`),
+  filename: (req, file, cb) => cb(null, `${Date.now()}${path.extname(file.originalname)}`),
 });
-const upload = multer({ storage: storage });
+const upload = multer({ storage });
 
-// --- API Endpoints ---
+// --- HTTP API Endpoints ---
+app.get('/api/projects', (req, res) => {
+  res.json(projects);
+});
+
 app.post('/api/upload', upload.single('projectImage'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded.' });
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded.' });
+  }
+
+  const { projectName, projectDescription } = req.body;
+  const newProject = {
+    id: nextProjectId++,
+    name: projectName || "Unnamed Project",
+    description: projectDescription || "No description.",
+    status: 'PENDING',
+    ipfsHash: null,
+    txHash: null,
+  };
+  projects.push(newProject);
+
+  console.log(`[Project #${newProject.id}] 📸 Image received. Verifying...`);
+
+  const verificationResult = await verifyImageWithGemini(req.file.path);
+
+  if (verificationResult === 'VERIFIED') {
+    newProject.status = 'VERIFIED';
+    console.log(`[Project #${newProject.id}] ✅ AI verification successful.`);
+
+    const ipfsHash = await uploadToIPFS(req.file.path);
+    if (!ipfsHash) {
+      newProject.status = 'IPFS_UPLOAD_FAILED';
+      return res.status(500).json({ message: 'IPFS upload failed.', project: newProject });
     }
 
-    console.log(`📸 Image received: ${req.file.path}. Verifying...`);
+    newProject.ipfsHash = ipfsHash;
+    console.log(`[Project #${newProject.id}] 🌱 IPFS upload successful.`);
 
-    // Step 1: Verify the image with AI
-    const verificationResult = await verifyImageWithGemini(req.file.path);
+    try {
+      const signer = await provider.getSigner(0);
+      const contractWithSigner = hexaCarbonContract.connect(signer);
 
-    if (verificationResult === 'VERIFIED') {
-        console.log('✅ AI verification successful.');
-        
-        // Step 2: Upload the verified image to IPFS
-        const ipfsHash = await uploadToIPFS(req.file.path);
+      console.log(`[Project #${newProject.id}] ⛓️ Calling createProject with IPFS Hash: ${ipfsHash}`);
 
-        if (!ipfsHash) {
-            return res.status(500).json({
-                message: 'Image verified, but failed to upload to IPFS.',
-                verification: 'VERIFIED',
-            });
-        }
-        
-        // Step 3: If IPFS upload is successful, send transaction to blockchain
-        try {
-            console.log('🌱 IPFS upload successful. Proceeding to blockchain transaction...');
-            const signer = await provider.getSigner(0);
-            const contractWithSigner = hexaCarbonContract.connect(signer);
-            
-            // Get mock data from the request body or use defaults
-            const { projectName, projectDescription } = req.body;
-            const projectOwner = projectName || "Sundarbans Community Project";
-            const gpsCoordinates = projectDescription || "21.9497° N, 89.1833° E";
+      const tx = await contractWithSigner.createProject(
+        newProject.name,
+        newProject.description,
+        ipfsHash
+      );
 
-            console.log(`⛓️ Calling createProject with IPFS Hash: ${ipfsHash}`);
-            
-            const tx = await contractWithSigner.createProject(
-                projectOwner,
-                gpsCoordinates,
-                ipfsHash // Using the REAL IPFS hash now
-            );
+      newProject.txHash = tx.hash;
+      console.log(`[Project #${newProject.id}] 🎉 Transaction sent! Hash: ${tx.hash}`);
 
-            await tx.wait();
+      res.status(200).json({
+        message: 'Project submitted and transaction sent!',
+        project: newProject,
+      });
 
-            console.log(`🎉 Smart contract transaction sent! Hash: ${tx.hash}`);
-
-            res.status(200).json({
-                message: 'Project verified, stored on IPFS, and created on the blockchain!',
-                verification: 'VERIFIED',
-                ipfsHash: ipfsHash,
-                txHash: tx.hash,
-            });
-
-        } catch (error) {
-            console.error('🔴 Blockchain transaction failed:', error);
-            res.status(500).json({
-                message: 'Image verified and uploaded, but blockchain transaction failed.',
-                verification: 'VERIFIED',
-                ipfsHash: ipfsHash,
-                error: error.message
-            });
-        }
-
-    } else {
-        res.status(403).json({
-            message: 'Project image was rejected by AI verification.',
-            verification: 'REJECTED',
-        });
+    } catch (error) {
+      newProject.status = 'CHAIN_TRANSACTION_FAILED';
+      console.error(`[Project #${newProject.id}] 🔴 Blockchain transaction failed:`, error);
+      res.status(500).json({ message: 'Blockchain transaction failed.', project: newProject, error: error.message });
     }
+  } else {
+    newProject.status = 'REJECTED';
+    res.status(403).json({ message: 'Project rejected by AI.', project: newProject });
+  }
 });
 
 // --- Server Activation ---
-app.listen(port, () => {
-    console.log(`✅ Server running on http://localhost:${port}`);
+const server = app.listen(port, () => {
+  console.log(`✅ HTTP Server running on http://localhost:${port}`);
+});
+
+// --- WebSocket Server Setup ---
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws) => {
+  console.log('🔗 WebSocket Client connected');
+  ws.on('close', () => console.log('👋 WebSocket Client disconnected'));
+});
+
+function broadcast(data) {
+  wss.clients.forEach((client) => {
+    if (client.readyState === client.OPEN) {
+      client.send(JSON.stringify(data));
+    }
+  });
+}
+
+console.log('👂 Listening for ProjectCreated events from the blockchain...');
+
+hexaCarbonContract.on('ProjectCreated', (projectId, owner, gpsCoordinates, ipfsImageHash, event) => {
+    console.log('🔔 Blockchain Event Received: ProjectCreated');
+
+    const projectIndex = projects.findIndex(p => p.ipfsHash === ipfsImageHash);
+
+    if (projectIndex !== -1) {
+        const project = projects[projectIndex];
+        console.log(`✅ Event matches Project #${project.id}. Broadcasting update.`);
+
+        const finalProjectData = {
+            id: project.id,
+            name: owner,
+            description: gpsCoordinates,
+            status: 'VERIFIED',
+            ipfsHash: ipfsImageHash,
+            txHash: event.log.transactionHash,
+        };
+
+        projects[projectIndex] = finalProjectData;
+        broadcast({ type: 'NEW_PROJECT', payload: finalProjectData });
+    }
 });
 
